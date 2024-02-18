@@ -1,0 +1,773 @@
+/*
+ Guilherme Polónio- 2202118
+ Tiago Oliveira - 2202142
+ IPLEIRIA - Instituto Politécnico de Leiria
+ ESTG - Escola Superior de Tecnologia e Gestão
+ LEEC- Licenciatura em Engenharia Automóvel
+ SEEV - Sistemas Elétricos e Eletrónicos de Veículos
+
+ TP1: Pretende-se neste trabalho realizar o controlo dos piscas e dos travoes com fita RGB e dos minimos a partir de um sensor LDR
+
+ LINK: https://www.youtube.com/watch?v=JAlqNOsd10E
+
+ */
+
+/* Definição das Bibliotecas*/
+#include "Arduino.h"
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
+#include "nvs_flash.h"
+#include "esp_task_wdt.h"
+#include <Adafruit_NeoPixel.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
+
+/*Definição do brilho da fita de 6 LEDs*/
+#define BRILHO_MINIMO    40
+#define BRILHO_STOP    255
+
+/*Definição da LDR*/
+#define ADC_RESOLUTION 8
+#define VREF_PLUS  3.3
+#define VREF_MINUS  0.0
+
+/*Definiçao do numero de leds da fita RGB*/
+#define NUM_LEDS_STOP 6
+#define NUM_LEDS_PISCA 5
+
+//define o pino do botao do stop
+#define PINO_BTN_STOP 14
+//define o pino do botao do pisca da esqeurda
+#define PINO_BTN_ESQUERDA 27
+//define o pino do botao do pisca da direita
+#define PINO_BTN_DIREITA 13
+//define o pino do botao do 4 piscas
+#define PINO_BTN_4_PISCAS 25
+//define o pino da LDR
+#define PINO_SENSOR_LUMINUSIDADE 32
+
+//define o pino do stop
+#define PINO_LUZ_STOP 2
+//define o pino do pisca da esquerda
+#define PINO_LUZ_ESQUERDA 4
+//define o pino do pisca da diretia
+#define PINO_LUZ_DIREITA 15
+
+SemaphoreHandle_t xMutex_UART;
+
+/*Declaraçao de semaforos binarios para quando se pressiona o botao*/
+SemaphoreHandle_t xBinarySemaphore_btn_stop;
+SemaphoreHandle_t xBinarySemaphore_btn_esquerda;
+SemaphoreHandle_t xBinarySemaphore_btn_direita;
+SemaphoreHandle_t xBinarySemaphore_btn_4_piscas;
+
+/*Usadas para mostrar o estado desejado entre diferentes tarefas*/
+QueueHandle_t xQueue_Estado_Desejado_Pisca_Esquerda = NULL;
+QueueHandle_t xQueue_Estado_Desejado_Pisca_Direita = NULL;
+QueueHandle_t xQueue_Estado_Desejado_4_Piscas = NULL;
+QueueHandle_t xQueue_estado_minimos = NULL;
+
+/*Funçoes para libertar semaphores e sao chamadas a partir de interrupçoes*/
+static void IRAM_ATTR vInterruptHandler_btn_stop(void);
+static void IRAM_ATTR vInterruptHandler_btn_pisca_esquerda(void);
+static void IRAM_ATTR vInterruptHandler_btn_pisca_direita(void);
+static void IRAM_ATTR vInterruptHandler_4_piscas(void);
+
+/*Declaraçoes de ponteiros para strings utilizadas para fornecer nomes as diferentes tarefas*/
+const char *pcTextFor_stop = "Stop task is running ";
+const char *pcTextFor_pisca_esquerda = "pisca_esquerda task is running ";
+const char *pcTextFor_pisca_direita = "pisca_direita task is running ";
+const char *pcTextFor_4_piscas = "4_piscas task is running ";
+const char *pcTextFor_Controla_Pisca_Esquerda =
+		"Controla_Pisca_Esquerda task is running ";
+const char *pcTextFor_Controla_Pisca_Direita =
+		"Controla_Pisca_Direita task is running ";
+const char *pcTextFor_Controla_4_Piscas = "Controla_4_Piscas task is running ";
+const char *pcTextFor_ADC = "ADC task is running ";
+const char *pcTextFor_Controla_Minimos = "Controla_Minimos task is running ";
+const char *pcTextFor_LDC = "LCD task is running ";
+
+/* Declaração das funções associadas a cada task */
+void vTask_STOP(void *pvParameters);
+void vTask_Pisca_esquerda(void *pvParameters);
+void vTask_Pisca_direita(void *pvParameters);
+void vTask_4_Piscas(void *pvParameters);
+void vTask_Controla_Pisca_esquerda(void *pvParameters);
+void vTask_Controla_Pisca_direita(void *pvParameters);
+void vTask_Controla_4_Piscas(void *pvParameters);
+void vTask_ADC(void *pvParameters);
+void vTask_Controla_Minimo(void *pvParameters);
+void vTask_LCD(void *pvParameters);
+
+/*Associado à gestão das tarefas*/
+TaskHandle_t xHandle_task_Controla_Pisca_Esquerda = NULL;
+TaskHandle_t xHandle_task_Controla_Pisca_Direita = NULL;
+TaskHandle_t xHandle_task_Controla_4_Piscas = NULL;
+TaskHandle_t xHandle_task_Controla_Minimos = NULL;
+
+
+void setup() {
+	vTaskPrioritySet(NULL, configMAX_PRIORITIES - 1);// Define a prioridade da tarefa principal
+	Serial.begin(115200);// taxa de baud de 115200
+	bool var_aux_verificacao_criacao_objetos = true;
+
+	pinMode(PINO_BTN_STOP, INPUT_PULLUP);// Representa o numero do pino e configura o pino como entrada ativando a resistencia de pull-up interno
+	attachInterrupt(digitalPinToInterrupt(PINO_BTN_STOP),
+			&vInterruptHandler_btn_stop, CHANGE);// mostra o numero do pino para o numero da interrupçao associada a esse pino
+
+	pinMode(PINO_BTN_ESQUERDA, INPUT);// Representa a configuraçao do pino como entrada digital e permite ler o seu estado digital
+	attachInterrupt(digitalPinToInterrupt(PINO_BTN_ESQUERDA),
+			&vInterruptHandler_btn_pisca_esquerda, CHANGE);// mostra o numero do pino para o numero da interrupçao associada a esse pino
+
+	pinMode(PINO_BTN_DIREITA, INPUT);
+	attachInterrupt(digitalPinToInterrupt(PINO_BTN_DIREITA),// Representa a configuraçao do pino como entrada digital e permite ler o seu estado digital
+			&vInterruptHandler_btn_pisca_direita, CHANGE);// mostra o numero do pino para o numero da interrupçao associada a esse pino
+
+	pinMode(PINO_BTN_4_PISCAS, INPUT_PULLUP);// Representa o numero do pino e configura o pino como entrada ativando a resistencia de pull-up interno
+	attachInterrupt(digitalPinToInterrupt(PINO_BTN_4_PISCAS),
+			&vInterruptHandler_4_piscas, CHANGE);// mostra o numero do pino para o numero da interrupçao associada a esse pino
+
+	/*Criação de semaforos binarios para controlarem eventos associados aos botoes*/
+	vSemaphoreCreateBinary(xBinarySemaphore_btn_stop);
+	vSemaphoreCreateBinary(xBinarySemaphore_btn_esquerda);
+	vSemaphoreCreateBinary(xBinarySemaphore_btn_direita);
+	vSemaphoreCreateBinary(xBinarySemaphore_btn_4_piscas);
+
+	//Criação das Queues de transferência de dados
+	xQueue_Estado_Desejado_Pisca_Esquerda = xQueueCreate(1, sizeof(char));
+	if (xQueue_Estado_Desejado_Pisca_Esquerda == NULL) {
+		var_aux_verificacao_criacao_objetos = false;
+	}
+	xQueue_Estado_Desejado_Pisca_Direita = xQueueCreate(1, sizeof(char));
+	if (xQueue_Estado_Desejado_Pisca_Direita == NULL) {
+		var_aux_verificacao_criacao_objetos = false;
+	}
+	xQueue_Estado_Desejado_4_Piscas = xQueueCreate(1, sizeof(char));
+	if (xQueue_Estado_Desejado_4_Piscas == NULL) {
+		var_aux_verificacao_criacao_objetos = false;
+	}
+
+	xQueue_estado_minimos = xQueueCreate(1, sizeof(char));
+	if (xQueue_estado_minimos == NULL) {
+		var_aux_verificacao_criacao_objetos = false;
+	}
+
+	xMutex_UART = xSemaphoreCreateMutex();
+	if (xMutex_UART == NULL) {
+		var_aux_verificacao_criacao_objetos = false;
+	}
+	if (var_aux_verificacao_criacao_objetos) {
+		xTaskCreatePinnedToCore(vTask_STOP, "STOP", 1024,
+				(void*) pcTextFor_stop, 15,
+				NULL, 1);
+		xTaskCreatePinnedToCore(vTask_Pisca_esquerda, "Pisca_Esquerda", 1024,
+				(void*) pcTextFor_pisca_esquerda, 12,
+				NULL, 1);
+		xTaskCreatePinnedToCore(vTask_Pisca_direita, "Pisca_Direita", 1024,
+				(void*) pcTextFor_pisca_direita, 12,
+				NULL, 1);
+		xTaskCreatePinnedToCore(vTask_4_Piscas, "4_Piscas", 1024,
+				(void*) pcTextFor_4_piscas, 13,
+				NULL, 1);
+		xTaskCreatePinnedToCore(vTask_ADC, "ADC", 1024, (void*) pcTextFor_ADC,
+				5, NULL, 1);
+		xTaskCreatePinnedToCore(vTask_Controla_Minimo, "Controla_Minimos", 1024,
+				(void*) pcTextFor_Controla_Minimos, 5,
+				&xHandle_task_Controla_Minimos, 1);
+		xTaskCreatePinnedToCore(vTask_LCD, "LCD", 4096, (void*) pcTextFor_LDC,
+				5, NULL, 1);
+
+	}interrupts();//Reinicia as interrupçoes apos a configuração
+}
+
+void loop() {
+	vTaskDelete(NULL); //Instrução para apagar a própria tarefa loop()
+}
+
+void vTask_LCD(void *pvParameters) {
+	char *pcTaskName;
+	TickType_t xLastWakeTime;
+	pcTaskName = (char*) pvParameters;
+	xLastWakeTime = xTaskGetTickCount();
+
+	Adafruit_ILI9341 tft = Adafruit_ILI9341(5, 26, 23, 18, 4, 19);	//Inicializa o display TFT
+
+	tft.begin(); //Inicializa o display
+	tft.fillScreen(ILI9341_BLACK);//Preenche a tela com cor preta
+	tft.setRotation(2); //Configura a rotação do display
+
+	tft.setTextSize(2);//Configura o tamanho do texto
+
+	/*Retangulos e textos representando os diferentes estados*/
+	tft.fillRoundRect(5, 20, 235, 75, 10, ILI9341_YELLOW);//Est.Dir
+	tft.setTextColor(ILI9341_BLACK);// Cor do texto
+	tft.setCursor(10, 27);// Posiçao
+	tft.print("Est.Dir:");//Texto imprimido no LCD
+
+	tft.fillRoundRect(5, 100, 235, 75, 10, ILI9341_RED);//Est.Min
+	tft.setTextColor(ILI9341_BLACK);// Cor do texto
+	tft.setCursor(10, 107);// Posiçao
+	tft.print("Est.Min:");//Texto imprimido no LCD
+	tft.setCursor(10, 137);// Posiçao
+	tft.print("Est.4Pis:");//Texto imprimido no LCD
+
+	tft.fillRoundRect(5, 180, 235, 75, 10, ILI9341_YELLOW);//Est.Esq
+	tft.setTextColor(ILI9341_BLACK);// Cor do texto
+	tft.setCursor(10, 187);// Posiçao
+	tft.print("Est.Esq:");//Texto imprimido no LCD
+
+	bool estado_luz_minimos = false;
+	bool estado_luz_pisca_esquerda = false;
+	bool estado_luz_pisca_direita = false;
+	bool estado_luz_4_piscas = false;
+
+	for (;;) {
+		/*Adquire e liberta um mutex para dar acesso*/
+		xSemaphoreTake(xMutex_UART, portMAX_DELAY);
+		{
+			Serial.println(pcTaskName);
+		}
+		xSemaphoreGive(xMutex_UART);
+		/*Atualiza o estado da grafica consoante as variaveis de estado*/
+		xQueuePeek(xQueue_estado_minimos, &estado_luz_minimos, 0);
+		xQueuePeek(xQueue_Estado_Desejado_Pisca_Esquerda,
+				&estado_luz_pisca_esquerda, 0);
+		xQueuePeek(xQueue_Estado_Desejado_Pisca_Direita,
+				&estado_luz_pisca_direita, 0);
+		xQueuePeek(xQueue_Estado_Desejado_4_Piscas, &estado_luz_4_piscas, 0);
+
+		if (estado_luz_minimos) {
+
+			tft.setTextColor(ILI9341_BLACK, ILI9341_YELLOW);// Cor do texto
+			tft.setCursor(125, 107);// Posiçao
+			tft.print("ON ");//Texto imprimido no LCD
+
+		} else {
+			tft.setTextColor(ILI9341_BLACK, ILI9341_YELLOW);// Cor do texto
+			tft.setCursor(125, 107);// Posiçao
+			tft.print("OFF");//Texto imprimido no LCD
+		}
+
+		if (estado_luz_4_piscas) {
+
+			tft.setTextColor(ILI9341_BLACK, ILI9341_ORANGE);// Cor do texto
+			tft.setCursor(125, 137);// Posiçao
+			tft.print("ON ");//Texto imprimido no LCD
+
+		} else {
+			tft.setTextColor(ILI9341_BLACK, ILI9341_ORANGE);// Cor do texto
+			tft.setCursor(125, 137);// Posiçao
+			tft.print("OFF");//Texto imprimido no LCD
+		}
+
+		if (estado_luz_pisca_esquerda) {
+
+			tft.setTextColor(ILI9341_BLACK, ILI9341_YELLOW);// Cor do texto
+			tft.setCursor(125, 187);// Posiçao
+			tft.print("ON ");//Texto imprimido no LCD
+
+		} else {
+			tft.setTextColor(ILI9341_BLACK, ILI9341_YELLOW);// Cor do texto
+			tft.setCursor(125, 187);// Posiçao
+			tft.print("OFF");//Texto imprimido no LCD
+		}
+
+		if (estado_luz_pisca_direita) {
+
+			tft.setTextColor(ILI9341_BLACK, ILI9341_YELLOW);// Cor do texto
+			tft.setCursor(125, 27);// Posiçao
+			tft.print("ON ");//Texto imprimido no LCD
+
+		} else {
+			tft.setTextColor(ILI9341_BLACK, ILI9341_YELLOW);// Cor do texto
+			tft.setCursor(125, 27);// Posiçao
+			tft.print("OFF");//Texto imprimido no LCD
+		}
+		/*Aplicação de um tempo de suspensão para a tarefa*/
+		vTaskDelayUntil(&xLastWakeTime, (100 / portTICK_PERIOD_MS));
+	}
+}
+
+void vTask_ADC(void *pvParameters) {
+	char *pcTaskName;
+	TickType_t xLastWakeTime;
+	pcTaskName = (char*) pvParameters;
+	xLastWakeTime = xTaskGetTickCount();
+
+	analogReadResolution(ADC_RESOLUTION);
+	//variaveis locais
+	uint8_t adc_luminusidade = 0;
+	bool estado_luz_minimos = false;
+
+	for (;;) {
+		xSemaphoreTake(xMutex_UART, portMAX_DELAY);
+		{
+			Serial.println(pcTaskName);
+		}
+		xSemaphoreGive(xMutex_UART);//liberta o mutex apos o uso
+		//le o sensor de luminosidade
+		adc_luminusidade = analogRead(PINO_SENSOR_LUMINUSIDADE);
+		//determina o estado da luz minima com base na leitura
+		if (adc_luminusidade > 130) {
+			estado_luz_minimos = true;
+		} else {
+			estado_luz_minimos = false;
+		}
+		//Atualiza com o estado atualizado
+		xQueueOverwrite(xQueue_estado_minimos, &estado_luz_minimos);
+
+		//Aplicação de um tempo de suspensão para a tarefa
+		vTaskDelayUntil(&xLastWakeTime, (100 / portTICK_PERIOD_MS));
+	}
+}
+
+void vTask_Controla_Minimo(void *pvParameters) {
+	char *pcTaskName;
+	TickType_t xLastWakeTime;
+	pcTaskName = (char*) pvParameters;
+	xLastWakeTime = xTaskGetTickCount();
+	//configuração dos Leds para indicar o estado dos minimos
+	Adafruit_NeoPixel leds_minimos(NUM_LEDS_STOP, PINO_LUZ_STOP,
+	NEO_GRB + NEO_KHZ800);
+	bool estado_luz_minimos = false;
+
+	//Inicializão dos Leds com base no estado atual dos minimos
+	xQueuePeek(xQueue_estado_minimos, &estado_luz_minimos, 0);
+	if (estado_luz_minimos) {
+		leds_minimos.begin();
+		leds_minimos.show();
+		leds_minimos.setBrightness(BRILHO_MINIMO);
+		for (int i = 0; i < NUM_LEDS_STOP; i++) {
+			leds_minimos.setPixelColor(i, 255, 0, 0);
+		}
+		leds_minimos.show();
+	} else {
+		leds_minimos.begin();
+		leds_minimos.show();
+		leds_minimos.setBrightness(0);
+		for (int i = 0; i < NUM_LEDS_STOP; i++) {
+			leds_minimos.setPixelColor(i, 255, 0, 0);
+		}
+		leds_minimos.show();
+	}
+	//ciclo infinito
+	for (;;) {
+
+		xSemaphoreTake(xMutex_UART, portMAX_DELAY);
+		{
+			Serial.println(pcTaskName);
+		}
+		xSemaphoreGive(xMutex_UART);// libera o mutex apos o uso
+		// obtem o estado atual dos minimos
+		xQueuePeek(xQueue_estado_minimos, &estado_luz_minimos, 0);
+		//Atualiza os Leds com base no estado atual
+		if (estado_luz_minimos) {
+
+			leds_minimos.setBrightness(BRILHO_MINIMO);
+			for (int i = 0; i < NUM_LEDS_STOP; i++) {
+				leds_minimos.setPixelColor(i, 255, 0, 0);
+			}
+			leds_minimos.show();
+		} else {
+			leds_minimos.setBrightness(0);
+			for (int i = 0; i < NUM_LEDS_STOP; i++) {
+				leds_minimos.setPixelColor(i, 255, 0, 0);
+			}
+			leds_minimos.show();
+		}
+		//Aplicação de um tempo de suspensão para a tarefa
+		vTaskDelayUntil(&xLastWakeTime, (100 / portTICK_PERIOD_MS));
+
+	}
+}
+
+void vTask_STOP(void *pvParameters) {
+	char *pcTaskName;
+	TickType_t xLastWakeTime;
+	pcTaskName = (char*) pvParameters;
+	xLastWakeTime = xTaskGetTickCount();
+	//configuração dos Leds para indicar o estado do Stop
+	Adafruit_NeoPixel leds_stop(NUM_LEDS_STOP, PINO_LUZ_STOP,
+	NEO_GRB + NEO_KHZ800);
+
+	leds_stop.begin();
+	leds_stop.show();
+	leds_stop.setBrightness(0);
+	for (int i = 0; i < NUM_LEDS_STOP; i++) {
+		leds_stop.setPixelColor(i, 255, 0, 0);
+	}
+	leds_stop.show();
+	//Variaveis de estado
+	bool estado_luz_stop = false;
+	bool estado_luz_minimos = false;
+
+	//Aguarda que p botao de pressao seja pressionado
+	xSemaphoreTake(xBinarySemaphore_btn_stop, 0);
+
+	//Ciclo infinito
+	for (;;) {
+
+		xSemaphoreTake(xBinarySemaphore_btn_stop, portMAX_DELAY);
+
+		xQueuePeek(xQueue_estado_minimos, &estado_luz_minimos, 0);
+
+		xSemaphoreTake(xMutex_UART, portMAX_DELAY);
+		{
+			Serial.println(pcTaskName);
+		}
+		xSemaphoreGive(xMutex_UART);
+		//Verifivca se o botao do Stop esta p+ressionado
+		if (!digitalRead(PINO_BTN_STOP)) {
+
+			//elimiina a tarefa do controlo dos minimos
+			vTaskDelete(xHandle_task_Controla_Minimos);
+
+			leds_stop.setBrightness(BRILHO_STOP);
+			for (int i = 0; i < NUM_LEDS_STOP; i++) {
+				leds_stop.setPixelColor(i, 255, 0, 0);
+			}
+			leds_stop.show();
+		} else if (digitalRead(PINO_BTN_STOP)) {
+			if (estado_luz_minimos) {
+				leds_stop.setBrightness(BRILHO_MINIMO);
+				for (int i = 0; i < NUM_LEDS_STOP; i++) {
+					leds_stop.setPixelColor(i, 255, 0, 0);
+				}
+				leds_stop.show();
+			} else {
+				leds_stop.setBrightness(0);
+				for (int i = 0; i < NUM_LEDS_STOP; i++) {
+					leds_stop.setPixelColor(i, 255, 0, 0);
+				}
+				leds_stop.show();
+
+			}
+			//Cria a tarefa de controle dos minimos
+			xTaskCreatePinnedToCore(vTask_Controla_Minimo, "Controla_Minimos",
+					1024, (void*) pcTextFor_Controla_Minimos, 5,
+					&xHandle_task_Controla_Minimos, 1);
+
+		}
+		//Aplicação de um tempo de suspensão para a tarefa
+		vTaskDelayUntil(&xLastWakeTime, (100 / portTICK_PERIOD_MS));
+	}
+}
+void vTask_Pisca_esquerda(void *pvParameters) {
+	char *pcTaskName;
+	TickType_t xLastWakeTime;
+	pcTaskName = (char*) pvParameters;
+	xLastWakeTime = xTaskGetTickCount();
+	//Variavel de controlo
+	bool estado_luz_pisca_esquerda = false;
+	//Aguarda que o sinal do botao esquerdo
+	xSemaphoreTake(xBinarySemaphore_btn_esquerda, 0);
+	for (;;) {
+		xSemaphoreTake(xBinarySemaphore_btn_esquerda, portMAX_DELAY);
+		xSemaphoreTake(xMutex_UART, portMAX_DELAY);
+		{
+			Serial.println(pcTaskName);
+			Serial.println(estado_luz_pisca_esquerda, DEC);
+		}
+		xSemaphoreGive(xMutex_UART);
+		//Alterna o estado da luz entre ligado e desligado
+		estado_luz_pisca_esquerda = estado_luz_pisca_esquerda ^ 1;
+
+		if (estado_luz_pisca_esquerda
+				&& xHandle_task_Controla_Pisca_Esquerda == NULL) {
+			xTaskCreatePinnedToCore(vTask_Controla_Pisca_esquerda,
+					"Controla_Piscas_esquerda", 1024,
+					(void*) pcTextFor_Controla_Pisca_Esquerda, 15,
+					&xHandle_task_Controla_Pisca_Esquerda, 1);
+		}
+		xQueueOverwrite(xQueue_Estado_Desejado_Pisca_Esquerda,
+				&estado_luz_pisca_esquerda);
+
+		//Aplicação de um tempo de suspensão para a tarefa
+		vTaskDelayUntil(&xLastWakeTime, (50 / portTICK_PERIOD_MS));
+	}
+}
+
+void vTask_Controla_Pisca_esquerda(void *pvParameters) {
+	char *pcTaskName;
+	TickType_t xLastWakeTime;
+	pcTaskName = (char*) pvParameters;
+	xLastWakeTime = xTaskGetTickCount();
+	//configuração dos Leds para indicar o estado do pisca esquerdo
+	Adafruit_NeoPixel leds_esquerda(NUM_LEDS_PISCA, PINO_LUZ_ESQUERDA,
+	NEO_GRB + NEO_KHZ800);
+	//Inicializaçao da fita leds_esquerda
+	leds_esquerda.begin();
+	leds_esquerda.show();
+	leds_esquerda.setBrightness(255);
+	for (int i = 0; i < NUM_LEDS_PISCA; i++) {
+		leds_esquerda.setPixelColor(i, 0, 0, 0);
+	}
+	leds_esquerda.show();
+
+	bool estado_luz_pisca_esquerda = false;
+
+	for (;;) {
+
+		xQueuePeek(xQueue_Estado_Desejado_Pisca_Esquerda,
+				&estado_luz_pisca_esquerda, 0);
+
+		if (estado_luz_pisca_esquerda) {
+			for (int i = 0; i < NUM_LEDS_PISCA; i++) {
+				leds_esquerda.setPixelColor(i, 255, 255, 0);
+				leds_esquerda.show();
+				vTaskDelayUntil(&xLastWakeTime, (100 / portTICK_PERIOD_MS));
+			}
+			for (int i = 0; i < NUM_LEDS_PISCA; i++) {
+				leds_esquerda.setPixelColor(i, 0, 0, 0);
+			}
+			leds_esquerda.show();
+
+			vTaskDelayUntil(&xLastWakeTime, (500 / portTICK_PERIOD_MS));
+
+		} else if (estado_luz_pisca_esquerda == false) {
+			for (int i = 0; i < NUM_LEDS_PISCA; i++) {
+				leds_esquerda.setPixelColor(i, 0, 0, 0);
+				leds_esquerda.show();
+			}
+			//limpa a taref a e desliga
+			xHandle_task_Controla_Pisca_Esquerda = NULL;
+			vTaskDelete(NULL);
+		}
+	}
+}
+
+void vTask_Pisca_direita(void *pvParameters) {
+	char *pcTaskName;
+	TickType_t xLastWakeTime;
+	pcTaskName = (char*) pvParameters;
+	xLastWakeTime = xTaskGetTickCount();
+	//Variavel de controlo
+	bool estado_luz_pisca_direita = false;
+	//Aguarda que o sinal do botao direito
+	xSemaphoreTake(xBinarySemaphore_btn_direita, 0);
+	for (;;) {
+		xSemaphoreTake(xBinarySemaphore_btn_direita, portMAX_DELAY);
+		xSemaphoreTake(xMutex_UART, portMAX_DELAY);
+		{
+			Serial.println(pcTaskName);
+		}
+		xSemaphoreGive(xMutex_UART);
+		//Alterna o estado da luz entre ligado e desligado
+		estado_luz_pisca_direita = estado_luz_pisca_direita ^ 1;
+
+		if (estado_luz_pisca_direita
+				&& xHandle_task_Controla_Pisca_Direita == NULL) {
+			xTaskCreatePinnedToCore(vTask_Controla_Pisca_direita,
+					"Controla_Piscas_direita", 1024,
+					(void*) pcTextFor_Controla_Pisca_Direita, 15,
+					&xHandle_task_Controla_Pisca_Direita, 1);
+		}
+		xQueueOverwrite(xQueue_Estado_Desejado_Pisca_Direita,
+				&estado_luz_pisca_direita);
+		//Aplicação de um tempo de suspensão para a tarefa
+		vTaskDelayUntil(&xLastWakeTime, (50 / portTICK_PERIOD_MS));
+	}
+}
+
+void vTask_Controla_Pisca_direita(void *pvParameters) {
+	char *pcTaskName;
+	TickType_t xLastWakeTime;
+	pcTaskName = (char*) pvParameters;
+	xLastWakeTime = xTaskGetTickCount();
+	//configuração dos Leds para indicar o estado do pisca direito
+	Adafruit_NeoPixel leds_direita(NUM_LEDS_PISCA, PINO_LUZ_DIREITA,
+	NEO_GRB + NEO_KHZ800);
+	//Inicializaçao da fita leds_direita
+	leds_direita.begin();
+	leds_direita.show();
+	leds_direita.setBrightness(255);
+	for (int i = 0; i < NUM_LEDS_PISCA; i++) {
+		leds_direita.setPixelColor(i, 0, 0, 0);
+	}
+	leds_direita.show();
+
+	bool estado_luz_pisca_direita = false;
+
+	for (;;) {
+
+		xQueuePeek(xQueue_Estado_Desejado_Pisca_Direita,
+				&estado_luz_pisca_direita, 0);
+
+		if (estado_luz_pisca_direita) {
+			for (int i = 0; i < NUM_LEDS_PISCA; i++) {
+				leds_direita.setPixelColor(i, 255, 255, 0);
+				leds_direita.show();
+				vTaskDelayUntil(&xLastWakeTime, (100 / portTICK_PERIOD_MS));
+			}
+			for (int i = 0; i < NUM_LEDS_PISCA; i++) {
+				leds_direita.setPixelColor(i, 0, 0, 0);
+			}
+			leds_direita.show();
+			//Aplicação de um tempo de suspensão para a tarefa
+			vTaskDelayUntil(&xLastWakeTime, (500 / portTICK_PERIOD_MS));
+
+		} else if (estado_luz_pisca_direita == false) {
+			for (int i = 0; i < NUM_LEDS_PISCA; i++) {
+				leds_direita.setPixelColor(i, 0, 0, 0);
+				leds_direita.show();
+			}
+			//limpa a taref a e desliga
+			xHandle_task_Controla_Pisca_Direita = NULL;
+			vTaskDelete(NULL);
+		}
+	}
+}
+void vTask_4_Piscas(void *pvParameters) {
+	char *pcTaskName;
+	TickType_t xLastWakeTime;
+	pcTaskName = (char*) pvParameters;
+	xLastWakeTime = xTaskGetTickCount();
+	//variavel dos 4 piscas
+	bool estado_luz_4_piscas = false;
+	//bloqueia ate o semaforo ser liberado
+	xSemaphoreTake(xBinarySemaphore_btn_4_piscas, 0);
+	for (;;) {
+		xSemaphoreTake(xBinarySemaphore_btn_4_piscas, portMAX_DELAY);
+		xSemaphoreTake(xMutex_UART, portMAX_DELAY);
+		{
+			Serial.println(pcTaskName);
+		}
+		xSemaphoreGive(xMutex_UART);
+		//altera o estado dos 4 piscas
+		estado_luz_4_piscas = estado_luz_4_piscas ^ 1;
+
+		if (estado_luz_4_piscas && xHandle_task_Controla_4_Piscas == NULL) {
+			xTaskCreatePinnedToCore(vTask_Controla_4_Piscas,
+					"Controla_4_Piscas", 1024,
+					(void*) pcTextFor_Controla_4_Piscas, 15,
+					&xHandle_task_Controla_4_Piscas, 1);
+		}
+		xQueueOverwrite(xQueue_Estado_Desejado_4_Piscas, &estado_luz_4_piscas);
+		//Aplicação de um tempo de suspensão para a tarefa
+		vTaskDelayUntil(&xLastWakeTime, (100 / portTICK_PERIOD_MS));
+	}
+}
+
+void vTask_Controla_4_Piscas(void *pvParameters) {
+	char *pcTaskName;
+	TickType_t xLastWakeTime;
+	pcTaskName = (char*) pvParameters;
+	xLastWakeTime = xTaskGetTickCount();
+
+	Adafruit_NeoPixel leds_esquerda(NUM_LEDS_PISCA, PINO_LUZ_ESQUERDA,
+	NEO_GRB + NEO_KHZ800);
+
+	leds_esquerda.begin();
+	leds_esquerda.show();
+	leds_esquerda.setBrightness(255);
+	for (int i = 0; i < NUM_LEDS_PISCA; i++) {
+		leds_esquerda.setPixelColor(i, 0, 0, 0);
+	}
+	leds_esquerda.show();
+
+	bool estado_luz_pisca_esquerda = false;
+
+	Adafruit_NeoPixel leds_direita(NUM_LEDS_PISCA, PINO_LUZ_DIREITA,
+	NEO_GRB + NEO_KHZ800);
+
+	leds_direita.begin();
+	leds_direita.show();
+	leds_direita.setBrightness(255);
+	for (int i = 0; i < NUM_LEDS_PISCA; i++) {
+		leds_direita.setPixelColor(i, 0, 0, 0);
+	}
+	leds_direita.show();
+
+	bool estado_luz_4_piscas = false;
+
+	for (;;) {
+
+		xQueuePeek(xQueue_Estado_Desejado_4_Piscas, &estado_luz_4_piscas, 0);
+
+		if (estado_luz_4_piscas) {
+			for (int i = 0; i < NUM_LEDS_PISCA; i++) {
+				leds_esquerda.setPixelColor(i, 255, 255, 0);
+				leds_direita.setPixelColor(i, 255, 255, 0);
+				leds_esquerda.show();
+				leds_direita.show();
+				vTaskDelayUntil(&xLastWakeTime, (100 / portTICK_PERIOD_MS));
+			}
+			for (int i = 0; i < NUM_LEDS_PISCA; i++) {
+				leds_esquerda.setPixelColor(i, 0, 0, 0);
+				leds_direita.setPixelColor(i, 0, 0, 0);
+			}
+			leds_esquerda.show();
+			leds_direita.show();
+
+			vTaskDelayUntil(&xLastWakeTime, (500 / portTICK_PERIOD_MS));
+
+		} else if (estado_luz_4_piscas == false) {
+			for (int i = 0; i < NUM_LEDS_PISCA; i++) {
+				leds_esquerda.setPixelColor(i, 0, 0, 0);
+				leds_direita.setPixelColor(i, 0, 0, 0);
+				leds_esquerda.show();
+				leds_direita.show();
+			}
+
+			xHandle_task_Controla_4_Piscas = NULL;
+			vTaskDelete(NULL);
+		}
+	}
+}
+static void IRAM_ATTR vInterruptHandler_btn_stop(void) {
+	//variavel para indicar se uma tarefa de maior prioridade pode ser usada
+	static signed portBASE_TYPE xHigherPriorityTaskWoken;
+	xHigherPriorityTaskWoken = pdFALSE;
+	//liberta o semaforo a partir da isr
+	xSemaphoreGiveFromISR(xBinarySemaphore_btn_stop,
+			(signed portBASE_TYPE*)&xHigherPriorityTaskWoken);
+	//
+	if (xHigherPriorityTaskWoken == pdTRUE) {
+		//força uma troca para uma tarefa de maior prioridade
+		portYIELD_FROM_ISR();
+	}
+}
+
+static void IRAM_ATTR vInterruptHandler_btn_pisca_esquerda(void) {
+	detachInterrupt(PINO_BTN_ESQUERDA);
+	static signed portBASE_TYPE xHigherPriorityTaskWoken;
+	xHigherPriorityTaskWoken = pdFALSE;
+	xSemaphoreGiveFromISR(xBinarySemaphore_btn_esquerda,
+			(signed portBASE_TYPE*)&xHigherPriorityTaskWoken);
+
+	if (xHigherPriorityTaskWoken == pdTRUE) {
+		portYIELD_FROM_ISR();
+	}
+
+	attachInterrupt(digitalPinToInterrupt(PINO_BTN_ESQUERDA),
+			&vInterruptHandler_btn_pisca_esquerda, CHANGE);
+}
+
+static void IRAM_ATTR vInterruptHandler_btn_pisca_direita(void) {
+	detachInterrupt(PINO_BTN_DIREITA);
+
+	static signed portBASE_TYPE xHigherPriorityTaskWoken;
+	xHigherPriorityTaskWoken = pdFALSE;
+	xSemaphoreGiveFromISR(xBinarySemaphore_btn_direita,
+			(signed portBASE_TYPE*)&xHigherPriorityTaskWoken);
+
+	if (xHigherPriorityTaskWoken == pdTRUE) {
+		portYIELD_FROM_ISR();
+	}
+	attachInterrupt(digitalPinToInterrupt(PINO_BTN_DIREITA),
+			&vInterruptHandler_btn_pisca_direita, CHANGE);
+}
+
+static void IRAM_ATTR vInterruptHandler_4_piscas(void) {
+	static signed portBASE_TYPE xHigherPriorityTaskWoken;
+	xHigherPriorityTaskWoken = pdFALSE;
+	xSemaphoreGiveFromISR(xBinarySemaphore_btn_4_piscas,
+			(signed portBASE_TYPE*)&xHigherPriorityTaskWoken);
+
+	if (xHigherPriorityTaskWoken == pdTRUE) {
+		portYIELD_FROM_ISR();
+	}
+}
